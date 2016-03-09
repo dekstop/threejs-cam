@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>cam</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <style>
+        body {
+            background-color: #050505;
+            margin: 0px;
+/*            overflow: hidden;*/
+        }
+        #msg {
+            padding: 4em;
+            color: #ffffff;
+            position: absolute;
+        }
+    </style>
+</head>
+<body>
+    
+<div id="msg"></div>
+<div id="container"></div>
+
+<script src="js/vendor/three-r74.min.js"></script>
+<script src="js/vendor/OrbitControls.js"></script>
+<script src="js/vendor/Detector.js"></script>
+<script src="js/vendor/stats.min.js"></script>
+
+<script type="x-shader/x-vertex" id="vertexshader">
+uniform sampler2D map;
+uniform float scale;
+uniform float w;
+uniform float h;
+uniform float dx;
+uniform float dy;
+uniform float pointSize;
+
+// attribute vec3 position;
+attribute float alpha;
+varying vec3 vColor;
+varying vec3 vNormal;
+varying float vAlpha;
+
+void main() {
+    vec4 texel = texture2D(map, vec2((position.x/w+0.5), position.y/h+0.5));
+
+    // Surface normal
+    vec4 x1 = texture2D(map, vec2((position.x-dx)/w+0.5, position.y/h+0.5));
+    vec4 x2 = texture2D(map, vec2((position.x+dx)/w+0.5, position.y/h+0.5));
+    vec4 y1 = texture2D(map, vec2(position.x/w+0.5, (position.y-dy)/h+0.5));
+    vec4 y2 = texture2D(map, vec2(position.x/w+0.5, (position.y+dy)/h+0.5));
+    vec3 normal = vec3(
+        (x1.r+x1.g+x1.b)/3.0 - (x2.r+x2.g+x2.b)/3.0, // Luminosity differences
+        (y1.r+y1.g+y1.b)/3.0 - (y2.r+y2.g+y2.b)/3.0,
+        0.0 
+    );
+
+    // Translate
+    float amount = (texel.r + texel.g + texel.b) / 3.0;
+    vec3 newPosition = position - normal * scale + vec3(0, 0, -1) * amount * scale;
+    vec4 mvPosition = modelViewMatrix * vec4(newPosition, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
+    gl_PointSize = pointSize;// * (1. + abs(gl_Position.z) / scale);
+
+    // Varyings
+    vColor = texel.xyz;
+    vNormal = normal;
+    vAlpha = alpha;
+}
+</script>
+
+<script type="x-shader/x-fragment" id="fragmentshader">
+varying vec3 vColor;
+varying vec3 vNormal;
+varying float vAlpha;
+
+void main() {
+    // Green
+    // gl_FragColor = vec4(0., 1., 0., vAlpha);
+    // gl_FragColor = vec4(0., 1., 0., 0.1);
+
+    // Original color
+    // gl_FragColor = vec4(vColor, vAlpha);
+
+    // Show normals
+    // gl_FragColor = vec4(vNormal.x + 0.5, vNormal.y + 0.5, 0, vAlpha);
+
+    // Mix into green
+    float a = (vColor.x + vColor.y + vColor.z) / 3.0;
+    gl_FragColor = vec4(
+        mix(mix(vColor.x, a, 0.8),  0., .5),
+        mix(mix(vColor.y, a, 1.),   0., .0),
+        mix(mix(vColor.z, a, 0.9),  0., .8),
+        vAlpha);
+}
+</script>
+
+<script>
+if (!Detector.webgl) Detector.addGetWebGLMessage();
+
+var container, stats;
+var camera, scene, renderer, controls;
+var particleSystem;
+
+var video;
+var msg = document.querySelector('#msg');
+
+navigator.getMedia = ( navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia);
+if (!navigator.getMedia) {
+    msg.innerHTML = "Your browser does not allow access to the built-in camera. Try Chrome instead.";
+    initJpeg();
+} else {
+    initCam();
+}
+
+function initJpeg() {
+    var loader = new THREE.TextureLoader();
+    loader.load('map.jpg', function(texture) {
+        makeScene(texture);
+        update();
+    });
+}
+
+function initCam() {
+    console.log("getting cam...")
+    navigator.getMedia(
+        {
+        audio: false,
+        video: true,
+        // { width: 1280, height: 720 }
+        // {
+            // facingMode: "user",
+            // width: 320,
+            // height: 240,
+            // frameRate: 10
+        // }
+    },
+        function(stream) {
+            console.log(stream)
+            video = document.createElement('video');
+            video.width = 320;
+            video.height = 240;
+            video.autoplay = true;
+            video.loop = true;
+            video.src = window.URL.createObjectURL(stream);
+            document.body.appendChild(video);
+            console.log("streaming...")
+        
+            var videoTexture = new THREE.Texture(video);
+            videoTexture.minFilter = THREE.NearestFilter;
+            makeScene(videoTexture);
+            update();
+        }, 
+        function(error) {
+            console.log(error)
+            msg.innerHTML = error;
+            initJpeg();
+        });
+}
+
+function makeScene(mapTexture) {
+    container = document.getElementById('container');
+
+    var numParticles = 50000;
+    var positions = new Float32Array(numParticles * 3);
+    var colors = new Float32Array(numParticles * 3);
+    var alphas = new Float32Array(numParticles);
+
+    var aspect = mapTexture.image.width / mapTexture.image.height;
+    var scanline = 3; // Vertical spacing in relation to horizontal spacing
+    var numCols = Math.round(Math.sqrt(numParticles * (aspect * scanline)));
+    var numRows = Math.round(Math.sqrt(numParticles / (aspect * scanline)));
+    var w = 2000;
+    var h = w / aspect;
+
+    var color = new THREE.Color();
+    for (var i=0; i<numParticles; i++) {
+
+        var x = -w/2 + (i % numCols) / numCols * w;
+        var y = h/2 - Math.trunc(i / numCols) / numRows * h;
+        var z = 0;
+        positions[i*3]     = x;
+        positions[i*3 + 1] = y;
+        positions[i*3 + 2] = z;
+
+        var vx = (x / numCols) + 0.5;
+        var vy = (y / numCols) + 0.5;
+        var vz = (z / numCols) + 0.5;
+        color.setRGB(vx, vy, vz);
+        colors[i*3]     = color.r;
+        colors[i*3 + 1] = color.g;
+        colors[i*3 + 2] = color.b;
+        
+        alphas[i] = 1;
+    }
+
+    var geometry = new THREE.BufferGeometry();
+    geometry.addAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.addAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.addAttribute('alpha', new THREE.BufferAttribute(alphas, 1));
+    geometry.computeBoundingSphere();
+
+    var uniforms = {
+        map: { type: "t", value: mapTexture },
+        scale: { type: "f", value: 200 }, // intensity
+        w: { type: "f", value: w }, // grid width in coordinate units
+        h: { type: "f", value: h }, // grid height in coordinate units
+        dx: { type: "f", value: w/numCols }, // grid step width (point spacing)
+        dy: { type: "f", value: h/numRows }, // grid step height (point spacing)
+        pointSize: { type: "f", value: 2. }, // in screen pixels
+        //time: { type: "f", value: 0 },
+    };
+    var material = new THREE.ShaderMaterial({
+        uniforms: uniforms,
+        vertexShader: document.getElementById('vertexshader').textContent,
+        fragmentShader: document.getElementById('fragmentshader').textContent,
+        transparent: true,
+        depthTest: false,
+    });
+    material.blending = THREE.AdditiveBlending;
+    
+    particleSystem = new THREE.Points(geometry, material);
+    // particleSystem.sortParticles = true;
+    scene = new THREE.Scene();
+    scene.add(particleSystem);
+
+    renderer = new THREE.WebGLRenderer({ antialias: false });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    container.appendChild(renderer.domElement);
+    
+    camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 10000);
+    camera.position.set(0, 0, -1700);
+    camera.lookAt(particleSystem.position);
+    // camera.lookAt(new THREE.Vector3(0,0,0));
+    controls = new THREE.OrbitControls(camera, renderer.domElement);
+
+    stats = new Stats();
+    stats.domElement.style.position = 'absolute';
+    stats.domElement.style.top = '0px';
+    container.appendChild(stats.domElement);
+
+    window.addEventListener('resize', onWindowResize, false);
+}
+
+function onWindowResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+function update() {
+    render();
+    controls.update();
+    stats.update();
+    requestAnimationFrame(update);
+}
+
+function render() {
+    var time = performance.now() / 1000;
+    // particleSystem.material.uniforms.time.value = time;
+    
+    if (video) {
+        if(video.readyState === video.HAVE_ENOUGH_DATA) {
+            particleSystem.material.uniforms.map.value.needsUpdate = true;
+        }
+    }
+
+    // var alphas = particleSystem.geometry.attributes.alpha;
+    // var count = alphas.count;
+    // for(var i = 0; i < count; i ++) {
+    //     alphas.array[i] *= 0.99;
+    //     if (alphas.array[i] < 0.1) {
+    //         alphas.array[i] = 1.0;
+    //     }
+    // }
+    // alphas.needsUpdate = true; // important!
+
+    // particleSystem.rotation.x = time * 0.25;
+    // particleSystem.rotation.y = time * 0.5;
+    renderer.render(scene, camera);
+}
+
+</script>
+
+</body>
+</html>

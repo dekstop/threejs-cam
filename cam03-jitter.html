@@ -157,7 +157,11 @@ function initCam() {
         }, 
         function(error) {
             console.log(error)
-            msg.innerHTML = error;
+            if (error.message) {
+                msg.innerHTML = error.name + ": " + error.message;
+            } else {
+                msg.innerHTML = error;
+            }
             initJpeg();
         });
 }
